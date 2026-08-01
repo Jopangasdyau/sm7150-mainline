@@ -1,0 +1,126 @@
+name: surya mainline kernel build
+
+on:
+  push:
+    branches: [ v7.1 ]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "branch/tag/commit to build"
+        required: false
+        default: "v7.1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+  OUT: out
+  FRAGMENT: sm7150.config ci-selinux.config
+  DTB_GLOB: "sm7150-xiaomi-surya-huaxing.dtb"
+  # stock/extracted ramdisk — must exist in-tree at this path, adjust to your layout
+  RAMDISK: boot/surya-ramdisk.cpio.gz
+  CMDLINE: "console=ttyMSM0,115200n8 earlycon androidboot.selinux=permissive"
+  # boot header fields below are from an actual surya (Poco X3 NFC) stock boot.img
+  # teardown — these drift between firmware revisions, verify with unpackbootimg
+  # against your own copy before trusting the output to boot
+  HEADER_VERSION: "2"
+  PAGESIZE: "4096"
+  BASE: "0x00000000"
+  KERNEL_OFFSET: "0x00008000"
+  RAMDISK_OFFSET: "0x01000000"
+  TAGS_OFFSET: "0x00000100"
+  DTB_OFFSET: "0x01f00000"
+  SECOND_OFFSET: "0x00f00000"
+  OS_VERSION: "10.0.0"
+  OS_PATCH_LEVEL: "2020-08"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 1
+
+      - name: install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-aarch64-linux-gnu bc bison flex \
+            libssl-dev libelf-dev dwarves device-tree-compiler ccache
+
+      - name: restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-surya-${{ github.sha }}
+          restore-keys: ccache-surya-
+
+      - name: configure ccache
+        run: |
+          echo "CROSS_COMPILE=ccache ${CROSS_COMPILE}" >> "$GITHUB_ENV"
+          ccache -M 5G
+
+      # SECURITY_SELINUX_FS isn't a live Kconfig symbol in current mainline —
+      # selinuxfs is bundled into SECURITY_SELINUX itself now. left the line in
+      # since an unknown symbol is a harmless no-op on merge, doesn't hurt anything
+      - name: extra config fragment
+        run: |
+          mkdir -p kernel/configs
+          printf '%s\n' \
+            'CONFIG_SECURITY_SELINUX=y' \
+            'CONFIG_SECURITY_SELINUX_FS=y' \
+            > kernel/configs/ci-selinux.config
+
+      # this is your literal `defconfig sm7150.config`, plus the fragment above —
+      # kbuild merges any extra *.config targets onto the base defconfig
+      # automatically. requires both to live under kernel/configs/ in-tree; if
+      # sm7150.config lives elsewhere, swap this line for merge_config.sh instead
+      - name: defconfig
+        run: make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" O=$OUT defconfig $FRAGMENT
+
+      - name: build Image.gz + dtbs
+        run: make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" O=$OUT -j$(nproc) Image.gz dtbs
+
+      - name: locate surya dtb
+        run: |
+          DTB=$(find $OUT/arch/arm64/boot/dts -iname "$DTB_GLOB" | head -n1)
+          [ -n "$DTB" ] || { echo "::error::no dtb matched $DTB_GLOB under $OUT/arch/arm64/boot/dts"; exit 1; }
+          echo "DTB_PATH=$DTB" >> "$GITHUB_ENV"
+
+      - name: build mkbootimg tool
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/mkbootimg mkbootimg-tool
+          make -C mkbootimg-tool CROSS_COMPILE=
+
+      - name: pack boot.img
+        run: |
+          test -f "$RAMDISK" || { echo "::error::ramdisk not found at $RAMDISK"; exit 1; }
+          ./mkbootimg-tool/mkbootimg \
+            --kernel "$OUT/arch/arm64/boot/Image.gz" \
+            --ramdisk "$RAMDISK" \
+            --dtb "$DTB_PATH" \
+            --header_version "$HEADER_VERSION" \
+            --base "$BASE" \
+            --kernel_offset "$KERNEL_OFFSET" \
+            --ramdisk_offset "$RAMDISK_OFFSET" \
+            --tags_offset "$TAGS_OFFSET" \
+            --dtb_offset "$DTB_OFFSET" \
+            --second_offset "$SECOND_OFFSET" \
+            --pagesize "$PAGESIZE" \
+            --os_version "$OS_VERSION" \
+            --os_patch_level "$OS_PATCH_LEVEL" \
+            --cmdline "$CMDLINE" \
+            -o boot.img
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: surya-${{ github.sha }}
+          path: |
+            boot.img
+            ${{ env.OUT }}/arch/arm64/boot/Image.gz
+            ${{ env.DTB_PATH }}
+          retention-days: 14

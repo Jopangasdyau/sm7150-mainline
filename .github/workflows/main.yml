@@ -2,7 +2,7 @@ name: surya mainline kernel build
 
 on:
   push:
-    branches: [ v7.1 ]
+    branches: [ v7.2 ]
   workflow_dispatch:
     inputs:
       ref:
@@ -17,8 +17,7 @@ concurrency:
 env:
   ARCH: arm64
   CROSS_COMPILE: aarch64-linux-gnu-
-  OUT: out
-  FRAGMENT: sm7150.config ci-selinux.config
+  FRAGMENT: sm7150.config
   DTB_NAME: sm7150-xiaomi-surya-huaxing.dtb
   STOCK_BOOT_URL: https://mirrorbits.lineageos.org/full/surya/20260727/boot.img
   CMDLINE: "console=ttyMSM0,115200n8 earlycon androidboot.selinux=permissive"
@@ -54,6 +53,15 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y build-essential gcc-aarch64-linux-gnu bc bison flex \
             libssl-dev libelf-dev dwarves device-tree-compiler ccache curl
+
+          # 8gb swap — defconfig kernel build can spike past what standard
+          # runners have in RAM. eats into free disk though, if the build
+          # starts failing on disk space instead, shrink this
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
           export CROSS_COMPILE="ccache $CROSS_COMPILE"
           ccache -M 5G
 
@@ -67,18 +75,17 @@ jobs:
           ./mkbootimg-tool/unpackbootimg -i stock_boot.img -o unpacked
           RAMDISK=$(ls unpacked/stock_boot.img-ramdisk* | head -n1)
 
-          mkdir -p kernel/configs
-          printf '%s\n' 'CONFIG_SECURITY_SELINUX=y' 'CONFIG_SECURITY_SELINUX_FS=y' \
-            > kernel/configs/ci-selinux.config
+          make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" defconfig $FRAGMENT
+          scripts/config --enable SECURITY_SELINUX --enable SECURITY_SELINUX_FS
+          make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
 
-          make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" O=$OUT defconfig $FRAGMENT
-          make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" O=$OUT -j"$(nproc)" Image.gz dtbs
+          make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" -j"$(nproc)" Image.gz dtbs
 
-          DTB=$(find $OUT/arch/arm64/boot/dts -iname "$DTB_NAME" | head -n1)
+          DTB=$(find arch/arm64/boot/dts -iname "$DTB_NAME" | head -n1)
           [ -n "$DTB" ] || { echo "::error::$DTB_NAME not found"; exit 1; }
 
           ./mkbootimg-tool/mkbootimg \
-            --kernel "$OUT/arch/arm64/boot/Image.gz" \
+            --kernel arch/arm64/boot/Image.gz \
             --ramdisk "$RAMDISK" \
             --dtb "$DTB" \
             --header_version "$HEADER_VERSION" \
@@ -94,7 +101,7 @@ jobs:
             --cmdline "$CMDLINE" \
             -o boot.img
 
-          cp "$OUT/arch/arm64/boot/Image.gz" .
+          cp arch/arm64/boot/Image.gz .
           cp "$DTB" ./surya.dtb
 
       - uses: actions/upload-artifact@v4

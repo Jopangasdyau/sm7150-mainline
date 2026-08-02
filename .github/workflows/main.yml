@@ -54,9 +54,10 @@ jobs:
           sudo apt-get install -y build-essential gcc-aarch64-linux-gnu bc bison flex \
             libssl-dev libelf-dev dwarves device-tree-compiler ccache curl
 
-          # 8gb swap — defconfig kernel build can spike past what standard
-          # runners have in RAM. eats into free disk though, if the build
-          # starts failing on disk space instead, shrink this
+          # 8gb swap — runner ships with ~4gb already active at /swapfile,
+          # tear it down first instead of colliding with it
+          sudo swapoff -a
+          sudo rm -f /swapfile
           sudo fallocate -l 8G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile

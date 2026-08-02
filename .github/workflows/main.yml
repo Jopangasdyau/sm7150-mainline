@@ -77,9 +77,6 @@ jobs:
           RAMDISK=$(ls unpacked/stock_boot.img-ramdisk* | head -n1)
 
           make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" defconfig $FRAGMENT
-          scripts/config --enable SECURITY_SELINUX --enable SECURITY_SELINUX_FS
-          make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
-
           make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" -j"$(nproc)" Image.gz dtbs
 
           DTB=$(find arch/arm64/boot/dts -iname "$DTB_NAME" | head -n1)

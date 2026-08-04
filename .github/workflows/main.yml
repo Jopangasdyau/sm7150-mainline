@@ -8,7 +8,7 @@ on:
       ref:
         description: "branch/tag/commit to build"
         required: false
-        default: "v7.1"
+        default: "v7.2"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -17,11 +17,10 @@ concurrency:
 env:
   ARCH: arm64
   CROSS_COMPILE: aarch64-linux-gnu-
-  CCACHE_DIR: ~/.ccache
-  FRAGMENT: arch/arm64/configs/sm7150.config
+  FRAGMENT: sm7150.config
   DTB_NAME: sm7150-xiaomi-surya-huaxing.dtb
   STOCK_BOOT_URL: https://mirrorbits.lineageos.org/full/surya/20260727/boot.img
-  CMDLINE: "console=ttyMSM0,115200n8 earlycon androidboot.selinux=permissive"
+  CMDLINE: "console=ttyMSM0,115200n8 console=tty0 debug ignore_loglevel androidboot.hardware=qcom service_locator.enable=1 lpm_levels.sleep_disabled=1 loop.max_part=7 androidboot.init_fatal_reboot_target=recovery"
   HEADER_VERSION: "2"
   PAGESIZE: "4096"
   BASE: "0x00000000"
@@ -29,9 +28,8 @@ env:
   RAMDISK_OFFSET: "0x01000000"
   TAGS_OFFSET: "0x00000100"
   DTB_OFFSET: "0x01f00000"
-  SECOND_OFFSET: "0x00f00000"
-  OS_VERSION: "10.0.0"
-  OS_PATCH_LEVEL: "2020-08"
+  OS_VERSION: "15.0.0"
+  OS_PATCH_LEVEL: "2026-06"
 
 jobs:
   build:
@@ -55,10 +53,11 @@ jobs:
           sudo apt-get install -y build-essential gcc-aarch64-linux-gnu bc bison flex \
             libssl-dev libelf-dev dwarves device-tree-compiler ccache curl
 
-          # Set up 8GB swap safely without swapfile holes
-          sudo swapoff -a || true
+          # 8gb swap — runner ships with ~4gb already active at /swapfile,
+          # tear it down first instead of colliding with it
+          sudo swapoff -a
           sudo rm -f /swapfile
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=none
+          sudo fallocate -l 8G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
@@ -69,18 +68,14 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/mkbootimg mkbootimg-tool
           make -C mkbootimg-tool CROSS_COMPILE=
 
+          # stock ramdisk pulled from a lineage nightly — URL is date-pinned,
+          # will 404 once that build rotates off the mirror, repoint as needed
           curl -fL "$STOCK_BOOT_URL" -o stock_boot.img
           mkdir -p unpacked
           ./mkbootimg-tool/unpackbootimg -i stock_boot.img -o unpacked
           RAMDISK=$(ls unpacked/stock_boot.img-ramdisk* | head -n1)
 
-          # Properly merge kernel configs
-          make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" defconfig
-          if [ -f "$FRAGMENT" ]; then
-            ./scripts/kconfig/merge_config.sh -m .config "$FRAGMENT"
-            make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
-          fi
-
+          make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" defconfig $FRAGMENT
           make ARCH=$ARCH CROSS_COMPILE="$CROSS_COMPILE" -j"$(nproc)" Image.gz dtbs
 
           DTB=$(find arch/arm64/boot/dts -iname "$DTB_NAME" | head -n1)
@@ -96,7 +91,6 @@ jobs:
             --ramdisk_offset "$RAMDISK_OFFSET" \
             --tags_offset "$TAGS_OFFSET" \
             --dtb_offset "$DTB_OFFSET" \
-            --second_offset "$SECOND_OFFSET" \
             --pagesize "$PAGESIZE" \
             --os_version "$OS_VERSION" \
             --os_patch_level "$OS_PATCH_LEVEL" \
